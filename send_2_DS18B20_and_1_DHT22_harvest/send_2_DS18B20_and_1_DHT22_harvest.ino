@@ -6,12 +6,10 @@
 #include <DallasTemperature.h>
 
 #define CONSOLE Serial
-#define INTERVAL_MS 10000 // Send data every 10 seconds
-#define ENDPOINT "uni.soracom.io"
-#define SKETCH_NAME "send_multi_sensor_data_to_lagoon"
-#define VERSION "1.3"
+#define INTERVAL_MS 300000 // 5分
+#define SERVER "harvest.soracom.io"
+#define PORT 8514
 
-/* for LTE-M Shield for Arduino */
 #define RX 10
 #define TX 11
 #define BAUDRATE 9600
@@ -19,15 +17,14 @@
 
 SoftwareSerial LTE_M_shieldUART(RX, TX);
 TinyGsm modem(LTE_M_shieldUART);
-TinyGsmClient ctx(modem);
+TinyGsmClient client(modem);
 
 #define DHTPIN 4
 #define DHTTYPE DHT22
 DHT dht(DHTPIN, DHTTYPE);
 
-// Settings for DallasTemperature sensors
-#define TRAY_ONE_WIRE_BUS 2 // Pin for the tray temperature sensor
-#define TUNNEL_ONE_WIRE_BUS 3 // Pin for the tunnel temperature sensor
+#define TRAY_ONE_WIRE_BUS 2
+#define TUNNEL_ONE_WIRE_BUS 3
 OneWire oneWireTray(TRAY_ONE_WIRE_BUS);
 OneWire oneWireTunnel(TUNNEL_ONE_WIRE_BUS);
 DallasTemperature traySensor(&oneWireTray);
@@ -37,30 +34,29 @@ void setup() {
   CONSOLE.begin(115200);
   LTE_M_shieldUART.begin(BAUDRATE);
 
-  CONSOLE.print(F("Welcome to "));
-  CONSOLE.print(SKETCH_NAME);
-  CONSOLE.print(F(" "));
-  CONSOLE.println(VERSION);
-  delay(3000);
+  CONSOLE.println(F("Starting..."));
 
   pinMode(BG96_RESET, OUTPUT);
-  digitalWrite(BG96_RESET, LOW);
-  delay(300);
-  digitalWrite(BG96_RESET, HIGH);
+  digitalWrite(BG96_RESET, HIGH); 
   delay(300);
   digitalWrite(BG96_RESET, LOW);
-  CONSOLE.println(F("Modem reset done."));
+  delay(10000);
 
-  modem.restart();
-  delay(500);
-
-  modem.gprsConnect("soracom.io", "sora", "sora");
-
-  while (!modem.isNetworkConnected()) {
-    delay(500);
+  if (!modem.restart()) {
+    CONSOLE.println(F("Failed to restart modem"));
+    return;
   }
 
-  CONSOLE.println(F("Network connected."));
+  String modemInfo = modem.getModemInfo();
+  CONSOLE.print(F("Modem: "));
+  CONSOLE.println(modemInfo);
+
+  if (!modem.gprsConnect("soracom.io", "sora", "sora")) {
+    CONSOLE.println(F("Failed to connect"));
+    return;
+  }
+
+  CONSOLE.println(F("GPRS connected"));
 
   dht.begin();
   traySensor.begin();
@@ -68,6 +64,15 @@ void setup() {
 }
 
 void loop() {
+  if (!client.connect(SERVER, PORT)) {
+    CONSOLE.println(F("Connection to server failed"));
+    delay(10000);
+    return;
+  }
+
+  CONSOLE.println(F("Connected to server"));
+
+  // センシング
   traySensor.requestTemperatures();
   float trayTemp = traySensor.getTempCByIndex(0);
   tunnelSensor.requestTemperatures();
@@ -75,37 +80,19 @@ void loop() {
   float ambientTemp = dht.readTemperature();
   float humidity = dht.readHumidity();
 
-  String payload = "{\"tray_temperature\":" + String(trayTemp, 2) +
-                   ",\"tunnel_temperature\":" + String(tunnelTemp, 2) +
-                   ",\"ambient_temperature\":" + String(ambientTemp, 2) +
-                   ",\"humidity\":" + String(humidity, 2) + "}";
+  // payload
+  String payload = "{\"tray_temperature\":" + (isnan(trayTemp) ? "null" : String(trayTemp, 2)) +
+                   ",\"tunnel_temperature\":" + (isnan(tunnelTemp) ? "null" : String(tunnelTemp, 2)) +
+                   ",\"ambient_temperature\":" + (isnan(ambientTemp) ? "null" : String(ambientTemp, 2)) +
+                   ",\"humidity\":" + (isnan(humidity) ? "null" : String(humidity, 2)) + "}";
 
+  // データ送信
+  client.print(payload);
+  CONSOLE.println(F("Data sent: "));
   CONSOLE.println(payload);
 
-  if (!ctx.connect(ENDPOINT, 80)) {
-    CONSOLE.println(F("Connection failed."));
-    delay(3000);
-    return;
-  }
-
-  ctx.print(F("POST / HTTP/1.1\r\n"));
-  ctx.print(F("Host: ")); ctx.print(ENDPOINT); ctx.println();
-  ctx.println(F("Content-Type: application/json"));
-  ctx.print(F("Content-Length: ")); ctx.println(payload.length());
-  ctx.println();
-  ctx.println(payload);
-
-  while (ctx.connected()) {
-    if (ctx.available()) {
-      String line = ctx.readStringUntil('\n');
-      if (line == "\r") {
-        CONSOLE.println(F("Headers received."));
-        break;
-      }
-    }
-  }
-  ctx.stop();
-  CONSOLE.println(F("Data sent."));
+  client.stop();
+  CONSOLE.println(F("Connection closed"));
 
   delay(INTERVAL_MS);
 }
